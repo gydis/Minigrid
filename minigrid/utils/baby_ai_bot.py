@@ -655,8 +655,12 @@ class BabyAIBot:
         best_distance_to_obj = 999
         best_pos = None
         best_obj = None
+        best_doors = []
+        initial = True
 
         for i in range(len(obj_desc.obj_set)):
+            doors = []
+
             if obj_desc.obj_set[i].type == "wall":
                 continue
             try:
@@ -665,8 +669,8 @@ class BabyAIBot:
                 obj_pos = obj_desc.obj_poss[i]
 
                 if self.vis_mask[obj_pos]:
-                    shortest_path_to_obj, _, with_blockers = self._shortest_path(
-                        lambda pos, cell: pos == obj_pos, try_with_blockers=True
+                    shortest_path_to_obj, _, with_blockers, doors = self._shortest_path(
+                        lambda pos, cell: pos == obj_pos, try_with_blockers=True, collect_doors=True
                     )
                     assert shortest_path_to_obj is not None
                     distance_to_obj = len(shortest_path_to_obj)
@@ -696,17 +700,24 @@ class BabyAIBot:
                     if adjacent and distance_to_obj == 1:
                         distance_to_obj = 3
 
-                    if distance_to_obj < best_distance_to_obj:
+                    # We always prefer a path with unlocked doors to one where doors are locked
+                    if (
+                        initial or
+                        (distance_to_obj < best_distance_to_obj and not any([door.is_locked for door in doors]))or
+                        not any([door.is_locked for door in doors]) and any([door.is_locked for door in best_doors])
+                    ):
                         best_distance_to_obj = distance_to_obj
                         best_pos = obj_pos
                         best_obj = obj_desc.obj_set[i]
+                        best_doors = doors
+                        initial = False
             except IndexError:
                 # Suppose we are tracking red keys, and we just used a red key to open a door,
                 # then for the last i, accessing obj_desc.obj_poss[i] will raise an IndexError
                 # -> Solution: Not care about that red key we used to open the door
                 pass
 
-        return best_obj, best_pos
+        return best_obj, best_pos, best_doors
 
     def _process_obs(self):
         """Parse the contents of an observation/image and update our state."""
@@ -761,7 +772,7 @@ class BabyAIBot:
                 return distance
             distance += 1
 
-    def _breadth_first_search(self, initial_states, accept_fn, ignore_blockers):
+    def _breadth_first_search(self, initial_states, accept_fn, ignore_blockers, collect_doors):
         """Performs breadth first search.
 
         This is pretty much your textbook BFS. The state space is agent's locations,
@@ -791,11 +802,19 @@ class BabyAIBot:
             # If we reached a position satisfying the acceptance condition
             if accept_fn((i, j), cell):
                 path = []
+                doors = []
                 pos = (i, j)
                 while pos:
                     path.append(pos)
+                    cell = grid.get(*pos)
+
+                    # Don't append the final door
+                    if cell and pos != (i, j):
+                        if cell.type == "door" and not cell.is_open:
+                            doors.append(cell)
+
                     pos = previous_pos[pos]
-                return path, (i, j), previous_pos
+                return path, (i, j), previous_pos, doors
 
             # If this cell was not visually observed, don't expand from it
             if not self.vis_mask[i, j]:
@@ -807,7 +826,7 @@ class BabyAIBot:
                 # If this is a door
                 elif cell.type == "door":
                     # If the door is closed, don't visit neighbors
-                    if not cell.is_open:
+                    if not cell.is_open and not collect_doors:
                         continue
                 elif not ignore_blockers:
                     continue
@@ -821,9 +840,9 @@ class BabyAIBot:
                 queue.append((next_state, (i, j)))
 
         # Path not found
-        return None, None, previous_pos
+        return None, None, previous_pos, []
 
-    def _shortest_path(self, accept_fn, try_with_blockers=False):
+    def _shortest_path(self, accept_fn, try_with_blockers=False, collect_doors=False):
         """
         Finds the path to any of the locations that satisfy `accept_fn`.
         Prefers the paths that avoid blockers for as long as possible.
@@ -836,13 +855,13 @@ class BabyAIBot:
 
         path = finish = None
         with_blockers = False
-        path, finish, previous_pos = self._breadth_first_search(
-            initial_states, accept_fn, ignore_blockers=False
+        path, finish, previous_pos, doors = self._breadth_first_search(
+            initial_states, accept_fn, ignore_blockers=False, collect_doors=collect_doors
         )
         if not path and try_with_blockers:
             with_blockers = True
-            path, finish, _ = self._breadth_first_search(
-                [(i, j, 1, 0) for i, j in previous_pos], accept_fn, ignore_blockers=True
+            path, finish, _, doors = self._breadth_first_search(
+                [(i, j, 1, 0) for i, j in previous_pos], accept_fn, ignore_blockers=True, collect_doors=collect_doors
             )
             if path:
                 # `path` now contains the path to a cell that is reachable without
@@ -850,6 +869,13 @@ class BabyAIBot:
                 pos = path[-1]
                 extra_path = []
                 while pos:
+                    cell = self.mission.unwrapped.grid.get(*pos)
+
+                    # Don't append the final door
+                    if cell != None and pos != path[-1]:
+                        if cell.type == "door" and not cell.is_open:
+                            doors.append(cell)
+
                     extra_path.append(pos)
                     pos = previous_pos[pos]
                 path = path + extra_path[1:]
@@ -860,7 +886,8 @@ class BabyAIBot:
             path = path[1:]
 
         # Note, that with_blockers only makes sense if path is not None
-        return path, finish, with_blockers
+        #print("candidate path", path, [d.cur_pos for d in doors])
+        return path, finish, with_blockers, doors
 
     def _find_drop_pos(self, except_pos=None):
         """
@@ -948,8 +975,9 @@ class BabyAIBot:
         def match_empty(pos, cell):
             i, j = pos
 
-            if np.array_equal(pos, self.mission.unwrapped.agent_pos):
-                return False
+            # Its fine to drop where the agent is
+            #if np.array_equal(pos, self.mission.unwrapped.agent_pos):
+            #    return False
 
             if except_pos and np.array_equal(pos, except_pos):
                 return False
@@ -959,16 +987,16 @@ class BabyAIBot:
 
             return True
 
-        _, drop_pos, _ = self._shortest_path(match_unblock)
+        _, drop_pos, _, _ = self._shortest_path(match_unblock)
 
         if not drop_pos:
-            _, drop_pos, _ = self._shortest_path(match_empty)
+            _, drop_pos, _, _ = self._shortest_path(match_empty)
 
         if not drop_pos:
-            _, drop_pos, _ = self._shortest_path(match_unblock, try_with_blockers=True)
+            _, drop_pos, _, _ = self._shortest_path(match_unblock, try_with_blockers=True)
 
         if not drop_pos:
-            _, drop_pos, _ = self._shortest_path(match_empty, try_with_blockers=True)
+            _, drop_pos, _, _ = self._shortest_path(match_empty, try_with_blockers=True)
 
         return drop_pos
 
