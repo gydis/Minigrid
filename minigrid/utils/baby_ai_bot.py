@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 
 from minigrid.core.world_object import WorldObj
@@ -309,9 +311,19 @@ class GoNextToSubgoal(Subgoal):
     def replan_before_action(self):
         target_obj = None
         if isinstance(self.datum, ObjDesc):
-            target_obj, target_pos = self.bot._find_obj_pos(
+            target_obj, target_pos, doors_to_open = self.bot._find_obj_pos(
                 self.datum, self.reason == "PutNext"
             )
+            if doors_to_open:
+                #print("where we want to go and doors agent:", self.bot.mission.unwrapped.agent_pos, "target:", target_pos, "doors:", [d.cur_pos for d in doors_to_open])
+                #import pdb
+                #pdb.set_trace()
+                self.bot.stack += list(itertools.chain.from_iterable([
+                    [OpenSubgoal(self.bot), GoNextToSubgoal(self.bot, unblock_thing, reason="Open")]
+                    for unblock_thing in doors_to_open
+                ]))
+                return
+
             if not target_pos:
                 # No path found -> Explore the world
                 self.bot.stack.append(ExploreSubgoal(self.bot))
@@ -389,22 +401,32 @@ class GoNextToSubgoal(Subgoal):
 
         # We are still far from the target
         # -> try to find a non-blocker path
-        path, _, _ = self.bot._shortest_path(
-            lambda pos, cell: pos == target_pos,
+        path, _, _, doors_to_open = self.bot._shortest_path(
+            lambda pos, cell: pos == target_pos, collect_doors=True
         )
 
         # No non-blocker path found and
         # reexploration within the room is not allowed or there is nothing to explore
         # -> Look for blocker paths
         if not path:
-            path, _, _ = self.bot._shortest_path(
-                lambda pos, cell: pos == target_pos, try_with_blockers=True
+            path, _, _, doors_to_open = self.bot._shortest_path(
+                lambda pos, cell: pos == target_pos, try_with_blockers=True, collect_doors=True
             )
 
         # No path found
         # -> explore the world
         if not path:
             self.bot.stack.append(ExploreSubgoal(self.bot))
+            return
+
+        if doors_to_open:
+            #print("where we want to go and doors agent:", self.bot.mission.unwrapped.agent_pos, "target:", target_pos, "doors:", [d.cur_pos for d in doors_to_open])
+            #import pdb
+            #pdb.set_trace()
+            self.bot.stack += list(itertools.chain.from_iterable([
+                [OpenSubgoal(self.bot), GoNextToSubgoal(self.bot, unblock_thing, reason="Open")]
+                for unblock_thing in doors_to_open
+            ]))
             return
 
         # So there is a path (blocker, or non-blockers)
@@ -490,7 +512,7 @@ class GoNextToSubgoal(Subgoal):
 class ExploreSubgoal(Subgoal):
     def replan_before_action(self):
         # Find the closest unseen position
-        _, unseen_pos, with_blockers = self.bot._shortest_path(
+        _, unseen_pos, with_blockers, doors = self.bot._shortest_path(
             lambda pos, cell: not self.bot.vis_mask[pos], try_with_blockers=True
         )
 
@@ -514,12 +536,12 @@ class ExploreSubgoal(Subgoal):
         # We do this because otherwise, opening a locked door as
         # a subgoal may try to open the same door for exploration,
         # resulting in an infinite loop.
-        _, door_pos, _ = self.bot._shortest_path(
+        _, door_pos, _, _ = self.bot._shortest_path(
             unopened_unlocked_door, try_with_blockers=True
         )
         if not door_pos:
             # Try to find a locker door if an unlocked one is not available.
-            _, door_pos, _ = self.bot._shortest_path(
+            _, door_pos, _, _ = self.bot._shortest_path(
                 unopened_door, try_with_blockers=True
             )
 
