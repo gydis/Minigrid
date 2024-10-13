@@ -326,6 +326,7 @@ class GoNextToSubgoal(Subgoal):
 
             if not target_pos:
                 # No path found -> Explore the world
+                raise RuntimeError("Requires exploration")
                 self.bot.stack.append(ExploreSubgoal(self.bot))
                 return
         elif isinstance(self.datum, WorldObj):
@@ -416,6 +417,7 @@ class GoNextToSubgoal(Subgoal):
         # No path found
         # -> explore the world
         if not path:
+            raise RuntimeError("Requires exploration")
             self.bot.stack.append(ExploreSubgoal(self.bot))
             return
 
@@ -511,6 +513,8 @@ class GoNextToSubgoal(Subgoal):
 
 class ExploreSubgoal(Subgoal):
     def replan_before_action(self):
+        print("explore")
+        raise RuntimeError("Exploration was required")
         # Find the closest unseen position
         _, unseen_pos, with_blockers, doors = self.bot._shortest_path(
             lambda pos, cell: not self.bot.vis_mask[pos], try_with_blockers=True
